@@ -227,6 +227,7 @@ def build_config_h(
                 "#endif",
                 "",
                 "#include <limits.h>",
+                "#include <stdbool.h>",
                 "#include <sys/stat.h>",
                 "#include <fcntl.h>",
                 "#if defined(S_IFSOCK) && S_IFSOCK == 0",
@@ -599,6 +600,82 @@ def build_dos_compat_c(gawk_source_dir: Path) -> str:
     )
 
 
+def build_dos_minrx_c(gawk_source_dir: Path) -> str:
+    """Build the C89-compatible ``minrx.c`` wrapper for 32-bit DOS (OpenWatcom).
+
+    Rewrites C99 compound literals ``LITERAL(Subexp) { ... }`` and
+    ``LITERAL(QVecInsert) { ... }`` in ``support/minrx.c`` into strict C89
+    ``static __inline`` constructor helpers so OpenWatcom C89 mode compiles
+    ``minrx.c`` cleanly.
+
+    Args:
+        gawk_source_dir: Path to upstream ``gawk`` source directory.
+
+    Returns:
+        Generated C source text for ``gawk_dos_minrx.c``.
+    """
+    nl = chr(10)
+    minrx_src = gawk_source_dir / "support" / "minrx.c"
+    content = minrx_src.read_text(encoding="utf-8") if minrx_src.is_file() else ""
+    if "LITERAL(Subexp)" in content and "awm_make_Subexp(" not in content:
+        content = content.replace(
+            "struct QVecInsert {" + nl + "\tbool newly;" + nl + "\tNState *newnsp;" + nl + "};",
+            "struct QVecInsert {"
+            + nl
+            + "\tbool newly;"
+            + nl
+            + "\tNState *newnsp;"
+            + nl
+            + "};"
+            + nl
+            + "static __inline QVecInsert awm_make_QVecInsert(bool n, NState *p) {"
+            " QVecInsert r; r.newly = n; r.newnsp = p; return r; }",
+            1,
+        )
+        content = content.replace(
+            "return LITERAL(QVecInsert) {newly, &q->storage[k]};",
+            "return awm_make_QVecInsert(newly, &q->storage[k]);",
+        )
+        content = content.replace(
+            "struct Subexp {"
+            + nl
+            + "\tNodeList nodes;"
+            + nl
+            + "\tsize_t maxstk;"
+            + nl
+            + "\tbool hasmin;"
+            + nl
+            + "};",
+            "struct Subexp {"
+            + nl
+            + "\tNodeList nodes;"
+            + nl
+            + "\tsize_t maxstk;"
+            + nl
+            + "\tbool hasmin;"
+            + nl
+            + "};"
+            + nl
+            + "static __inline Subexp awm_make_Subexp(NodeList n, size_t m, bool h) {"
+            " Subexp r; r.nodes = n; r.maxstk = m; r.hasmin = h; return r; }"
+            + nl
+            + "static __inline Subexp awm_make_Subexp_empty(void) {"
+            " Subexp r; r.nodes.first = NULL; r.nodes.final = NULL;"
+            " r.nodes.size = 0; r.maxstk = 0; r.hasmin = false; return r; }",
+            1,
+        )
+        content = content.replace(
+            "LITERAL(Subexp) {{NULL, NULL, 0}, 0, false}",
+            "awm_make_Subexp_empty()",
+        )
+        content = re.sub(
+            r"LITERAL\(Subexp\)\s*\{\s*([^,{}]+?)\s*,\s*([^,{}]+?)\s*,\s*([^{}]+?)\s*\}",
+            r"awm_make_Subexp(\1, \2, \3)",
+            content,
+        )
+    return content
+
+
 def generate_gawk_build_files(
     gawk_source_dir: Path,
     out_dir: Path,
@@ -714,6 +791,10 @@ def generate_gawk_build_files(
     else:
         (out_dir / "gawk_dos_compat.c").write_text(
             build_dos_compat_c(gawk_source_dir.resolve()),
+            encoding="utf-8",
+        )
+        (out_dir / "gawk_dos_minrx.c").write_text(
+            build_dos_minrx_c(gawk_source_dir.resolve()),
             encoding="utf-8",
         )
         io_src = gawk_source_dir.resolve() / "io.c"

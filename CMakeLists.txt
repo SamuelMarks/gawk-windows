@@ -114,6 +114,7 @@ if(GAWK_TARGET_DOS)
     )
     target_compile_definitions(gawk_dos_compat PRIVATE
         _SINGLE_THREAD=1
+        _BOOL_DEFINED=1
         AUTO_WIN_MSVC_MEGA_LIBRARY=1
     )
 endif()
@@ -132,7 +133,8 @@ endif()
 if(NOT DEFINED GAWK_SOURCE_DIR OR NOT EXISTS "${GAWK_SOURCE_DIR}/awk.h")
     FetchContent_Declare(
         gawk_upstream
-        URL https://ftp.gnu.org/gnu/gawk/gawk-5.3.1.tar.xz
+        GIT_REPOSITORY https://git.savannah.gnu.org/git/gawk.git
+        GIT_TAG        9b2156156f47076b5e588448a89129cc59701a65
     )
     FetchContent_MakeAvailable(gawk_upstream)
     set(GAWK_SOURCE_DIR "${gawk_upstream_SOURCE_DIR}")
@@ -195,12 +197,12 @@ set(GAWK_CORE_SOURCES
     "${GAWK_SOURCE_DIR}/version.c"
     "${GAWK_SOURCE_DIR}/support/getopt.c"
     "${GAWK_SOURCE_DIR}/support/getopt1.c"
-    "${GAWK_SOURCE_DIR}/support/minrx.c"
     "${GAWK_SOURCE_DIR}/support/random.c"
 )
 
 if(GAWK_TARGET_DOS)
     list(APPEND GAWK_CORE_SOURCES
+        "${GAWK_GEN_DIR}/gawk_dos_minrx.c"
         "${GAWK_GEN_DIR}/gawk_dos_io.c"
         "${GAWK_GEN_DIR}/gawk_dos_compat.c"
     )
@@ -216,6 +218,7 @@ if(GAWK_TARGET_DOS)
     )
 else()
     list(APPEND GAWK_CORE_SOURCES
+        "${GAWK_SOURCE_DIR}/support/minrx.c"
         "${GAWK_SOURCE_DIR}/io.c"
         "${GAWK_SOURCE_DIR}/gawkmisc.c"
         "${GAWK_SOURCE_DIR}/pc/popen.c"
@@ -273,6 +276,7 @@ target_compile_definitions(gawk PRIVATE
 if(GAWK_TARGET_DOS)
     target_compile_definitions(gawk PRIVATE
         _SINGLE_THREAD=1
+        _BOOL_DEFINED=1
     )
     target_link_libraries(gawk PRIVATE
         gawk_dos_compat

@@ -34,9 +34,13 @@ set "WCL386_FWD=%WATCOM_BIN:\=/%/wcl386.exe"
 
 set CMAKE_EXTRA_ARGS=
 if exist ..\auto-win-msvc\CMakeLists.txt (
-    set CMAKE_EXTRA_ARGS=!CMAKE_EXTRA_ARGS! -DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=..\auto-win-msvc
+    for %%I in ("..\auto-win-msvc") do set "AWM_ABS=%%~fI"
+    set "AWM_FWD=!AWM_ABS:\=/!"
+    set CMAKE_EXTRA_ARGS=!CMAKE_EXTRA_ARGS! "-DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=!AWM_FWD!"
 ) else if exist auto-win-msvc\CMakeLists.txt (
-    set CMAKE_EXTRA_ARGS=!CMAKE_EXTRA_ARGS! -DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=auto-win-msvc
+    for %%I in ("auto-win-msvc") do set "AWM_ABS=%%~fI"
+    set "AWM_FWD=!AWM_ABS:\=/!"
+    set CMAKE_EXTRA_ARGS=!CMAKE_EXTRA_ARGS! "-DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=!AWM_FWD!"
 )
 
 set BUILD_DIR=build_dos

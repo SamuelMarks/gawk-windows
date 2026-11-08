@@ -10,6 +10,7 @@ import pytest
 from scripts.generate_gawk_headers import (
     build_config_h,
     build_dos_compat_c,
+    build_dos_minrx_c,
     generate_gawk_build_files,
     main,
     parse_ac_init,
@@ -41,6 +42,7 @@ def test_build_config_h_windows_and_dos() -> None:
     assert "#define PIPES_SIMULATED 1" in dos_cfg
     assert "#undef DYNAMIC" in dos_cfg
     assert "#undef HAVE_SOCKETS" in dos_cfg
+    assert "#include <stdbool.h>" in dos_cfg
 
 
 def test_build_dos_compat_c(tmp_path: Path) -> None:
@@ -52,6 +54,34 @@ def test_build_dos_compat_c(tmp_path: Path) -> None:
     assert "gawk_name(const char *filespec)" in src_text
     assert "nl_langinfo(int item)" in src_text
     assert "/* popen body */" in src_text
+
+
+def test_build_dos_minrx_c(tmp_path: Path) -> None:
+    """Verify ``build_dos_minrx_c`` lowers C99 compound literals in ``minrx.c``."""
+    assert build_dos_minrx_c(tmp_path) == ""
+    support_dir = tmp_path / "support"
+    support_dir.mkdir(parents=True, exist_ok=True)
+    sample_minrx = (
+        "struct QVecInsert {\n\tbool newly;\n\tNState *newnsp;\n};\n"
+        "static QVecInsert foo(QVec *q, size_t k) {\n"
+        "    bool newly = true;\n"
+        "    return LITERAL(QVecInsert) {newly, &q->storage[k]};\n"
+        "}\n"
+        "struct Subexp {\n\tNodeList nodes;\n\tsize_t maxstk;\n\tbool hasmin;\n};\n"
+        "static Subexp bar(Subexp lh) {\n"
+        "    if (lh.maxstk == 0)\n"
+        "        return LITERAL(Subexp) {{NULL, NULL, 0}, 0, false};\n"
+        "    return LITERAL(Subexp) {lh.nodes, lh.maxstk, lh.hasmin};\n"
+        "}\n"
+    )
+    (support_dir / "minrx.c").write_text(sample_minrx, encoding="utf-8")
+    lowered = build_dos_minrx_c(tmp_path)
+    assert "awm_make_QVecInsert(newly, &q->storage[k])" in lowered
+    assert "awm_make_Subexp_empty()" in lowered
+    assert "awm_make_Subexp(lh.nodes, lh.maxstk, lh.hasmin)" in lowered
+    assert "LITERAL(Subexp)" not in lowered
+    (support_dir / "minrx.c").write_text(lowered, encoding="utf-8")
+    assert build_dos_minrx_c(tmp_path) == lowered
 
 
 def test_generate_gawk_build_files_windows_and_dos(tmp_path: Path) -> None:
@@ -79,6 +109,7 @@ def test_generate_gawk_build_files_windows_and_dos(tmp_path: Path) -> None:
     generate_gawk_build_files(gawk_dir, out_dos, target_dos=True)
     assert (out_dos / "config.h").is_file()
     assert (out_dos / "gawk_dos_compat.c").is_file()
+    assert (out_dos / "gawk_dos_minrx.c").is_file()
 
 
 def test_generate_gawk_build_files_missing_configure(tmp_path: Path) -> None:

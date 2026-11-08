@@ -572,8 +572,8 @@ module MSDOSOpenWatcomCI
 
         # Translate arguments for DOS COMMAND.COM safety:
         # For gawk program expressions containing pipes, quotes, braces, or spaces,
-        # stage the filter into C:\TEMP\JQFLT.JQ (or C:\JQFLT.JQ on MS-DOS 1.25/2.0)
-        # and pass `-f <filter_file>` so COMMAND.COM does not split or pipe `|`.
+        # stage the program into C:\TEMP\GAWKPRG.AWK (or C:\GAWKPRG.AWK on MS-DOS 1.25/2.0)
+        # and pass `-f <program_file>` so COMMAND.COM does not split or pipe `|`.
         dos_args = []
         filter_staged = false
         ARGV.each do |arg|
