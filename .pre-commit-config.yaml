@@ -1,0 +1,84 @@
+# =============================================================================
+# .pre-commit-config.yaml - Pre-Commit Quality, Typing, Coverage & Hygiene Gates
+# =============================================================================
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: mixed-line-ending
+        name: Enforce LF line endings (dos2unix)
+        args: [--fix=lf]
+        exclude: '(?i)(\.(cmd|bat|ps1|sln|vcxproj|filters)$)'
+
+      - id: mixed-line-ending
+        name: Enforce CRLF line endings for Windows scripts (unix2dos)
+        args: [--fix=crlf]
+        files: '(?i)(\.(cmd|bat|ps1|sln|vcxproj|filters)$)'
+
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        exclude: '(?i)(\.(cmd|bat|ps1|patch|diff)$)'
+      - id: trailing-whitespace
+        exclude: '(?i)(\.(cmd|bat|ps1|patch|diff)$)'
+
+  - repo: local
+    hooks:
+      - id: forbid-c-headers-and-sources
+        name: Forbid .c and .h files in gawk-windows
+        language: fail
+        entry: "Direct .c/.h files are forbidden in gawk-windows; use ../auto-win-msvc or build-time generation."
+        files: '(?i)\.(c|h|h\.in)$'
+
+      - id: ruff-check
+        name: Ruff Linter (D, DOC, ANN, B, E, F, I, UP, W)
+        entry: ruff check scripts tests
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: ruff-format
+        name: Ruff Formatter Check
+        entry: ruff format --check scripts tests
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: interrogate
+        name: Interrogate 100% Docstring Coverage
+        entry: interrogate --fail-under=100 -vv scripts tests
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: mypy
+        name: Mypy Strict Type Checking
+        entry: mypy --strict scripts tests
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: pytest-coverage
+        name: Pytest 100% Line, Branch & Function Coverage
+        entry: pytest --cov=scripts --cov=tests --cov-branch --cov-fail-under=100
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: doc-coverage-shield
+        name: Add/update '% doc coverage' shield in README.md
+        entry: python3 -m scripts.update_coverage_shields --doc
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: test-coverage-shield
+        name: Add/update '% test coverage' shield in README.md
+        entry: python3 -m scripts.update_coverage_shields --test
+        language: system
+        pass_filenames: false
+        always_run: true

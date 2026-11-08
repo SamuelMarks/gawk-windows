@@ -1,0 +1,302 @@
+# =============================================================================
+# .github/workflows/ci.yml - CI/CD Pipeline for gawk Windows & DOS
+#
+# Runs Python static analysis (ruff, interrogate, mypy --strict, pytest 100%
+# branch coverage, pre-commit), compiles gawk natively with MSVC (x86_64) on
+# windows-latest and with OpenWatcom v2 for 32-bit DOS (dos32, MS-DOS 1.25,
+# MS-DOS 2.0, and MS-DOS 4.0), executes the CTest functional verification
+# suite, packages portable ZIP, NSIS (.exe), WiX (.msi), and DOS (.zip/.exe)
+# archives via CPack, and publishes both Windows and DOS release assets to
+# GitHub Releases on v* tags.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gawk-windows
+        uses: actions/checkout@master
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@master
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          path: auto-win-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@master
+        with:
+          python-version: '3.12'
+
+      - name: Install Python QA & Coverage Tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-cov mypy ruff interrogate pre-commit
+
+      - name: Run Python Unit Tests (100% Coverage), Typing (mypy --strict), and Pre-Commit
+        run: |
+          ruff check scripts tests
+          ruff format --check scripts tests
+          interrogate --fail-under=100 -vv scripts tests
+          mypy --strict scripts tests
+          pytest --cov=scripts --cov=tests --cov-branch --cov-fail-under=100
+          pre-commit run --all-files
+
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout gawk-windows
+        uses: actions/checkout@master
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@master
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          ref: e12ccc1e1657eb8d230d7c9d0e9d5ae4f8072326
+          path: auto-win-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@master
+        with:
+          python-version: '3.12'
+
+      - name: Install Python QA & Coverage Tooling
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-cov mypy ruff interrogate pre-commit
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake
+        shell: cmd
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=auto-win-msvc
+
+      - name: Build gawk
+        shell: cmd
+        run: |
+          cmake --build build --config Release
+
+      - name: Test gawk (CTest)
+        shell: cmd
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          build\Release\gawk.exe --version
+
+      - name: Run Python Static Analysis and Unit Tests on Windows
+        shell: pwsh
+        run: |
+          ruff check scripts tests
+          ruff format --check scripts tests
+          interrogate --fail-under=100 -vv scripts tests
+          mypy --strict scripts tests
+          pytest --no-cov
+          $env:SKIP = "pytest-coverage,test-coverage-shield"
+          pre-commit run --all-files
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y
+          $nsisPath = if (Test-Path "${env:ProgramFiles(x86)}\NSIS") { "${env:ProgramFiles(x86)}\NSIS" } else { "$env:ProgramFiles\NSIS" }
+          echo "$nsisPath" >> $env:GITHUB_PATH
+          & "$nsisPath\makensis.exe" /VERSION
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          if (-not ($env:WIX -and (Test-Path "$env:WIX\bin\candle.exe")) -and -not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset -y
+          }
+          $wixBin = if ($env:WIX -and (Test-Path "$env:WIX\bin\candle.exe")) {
+            "$env:WIX\bin"
+          } else {
+            (Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset*\bin\candle.exe", "$env:ProgramFiles\WiX Toolset*\bin\candle.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+          }
+          if ($wixBin) {
+            echo "$wixBin" >> $env:GITHUB_PATH
+            & "$wixBin\candle.exe" -? | Select-Object -First 1
+          }
+
+      - name: Package with CPack
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like "refs/tags/*") {
+            $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            "5.4.60"
+          }
+          $pkgVersion = if ($version -match '^\d+\.\d+\.\d+(\.\d+)?$') { $version } else { "5.4.60" }
+          $fileName = "gawk-$version-$($env:RUNNER_ARCH)"
+          $setupFileName = "gawk-$version-$($env:RUNNER_ARCH)-setup"
+          Push-Location build
+          cpack -C Release -G ZIP -D "CPACK_PACKAGE_VERSION=$pkgVersion" -D "CPACK_PACKAGE_FILE_NAME=$fileName"
+          cpack -C Release -G NSIS -D "CPACK_PACKAGE_VERSION=$pkgVersion" -D "CPACK_PACKAGE_FILE_NAME=$setupFileName"
+          cpack -C Release -G WIX -D "CPACK_PACKAGE_VERSION=$pkgVersion" -D "CPACK_PACKAGE_FILE_NAME=$fileName"
+          Copy-Item "Release\gawk.exe" -Destination "$fileName.exe" -Force
+          Pop-Location
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: gawk-windows-${{ runner.arch }}-packages
+          path: |
+            build/gawk-*-${{ runner.arch }}.exe
+            build/gawk-*-${{ runner.arch }}-setup.exe
+            build/gawk-*-${{ runner.arch }}.msi
+            build/gawk-*-${{ runner.arch }}.zip
+
+      - name: Create GitHub Release (Windows Packages)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: GNU Awk for Windows & DOS ${{ github.ref_name }}
+          files: |
+            build/gawk-*-${{ runner.arch }}.exe
+            build/gawk-*-${{ runner.arch }}-setup.exe
+            build/gawk-*-${{ runner.arch }}.msi
+            build/gawk-*-${{ runner.arch }}.zip
+          generate_release_notes: true
+
+  build-dos:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout gawk-windows
+        uses: actions/checkout@master
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@master
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          ref: e12ccc1e1657eb8d230d7c9d0e9d5ae4f8072326
+          path: auto-win-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@master
+        with:
+          python-version: '3.12'
+
+      - name: Install OpenWatcom v2 Toolchain
+        run: |
+          sudo mkdir -p /opt/watcom
+          sudo chown -R "$USER:$USER" /opt/watcom
+          curl -fL --retry 3 -o /tmp/ow-snapshot.tar.xz https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+          tar -xJf /tmp/ow-snapshot.tar.xz -C /opt/watcom
+          rm -f /tmp/ow-snapshot.tar.xz
+
+      - name: Configure and Build 32-bit DOS gawk with OpenWatcom v2
+        run: |
+          export WATCOM="/opt/watcom"
+          if [ -d "$WATCOM/binl64" ]; then
+            WATCOM_BIN="$WATCOM/binl64"
+          else
+            WATCOM_BIN="$WATCOM/binl"
+          fi
+          export PATH="$WATCOM_BIN:$WATCOM/binw:$PATH"
+          export INCLUDE="$WATCOM/h"
+          export EDPATH="$WATCOM/eddat"
+          export WIPFC="$WATCOM/wipfc"
+
+          cmake -G "Watcom WMake" -B build_dos -S . -DCMAKE_SYSTEM_NAME=DOS -DCMAKE_SYSTEM_PROCESSOR=I386 -DCMAKE_C_COMPILER="$WATCOM_BIN/wcl386" -DCMAKE_C_FLAGS_INIT="-bt=dos -mf -3r -zq" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC="$PWD/auto-win-msvc"
+
+          cmake --build build_dos --config Release
+
+      - name: Package DOS Builds (dos32, MS-DOS 1.25, MS-DOS 2.0, MS-DOS 4.0)
+        run: |
+          export WATCOM="/opt/watcom"
+          if [ -d "$WATCOM/binl64" ]; then
+            WATCOM_BIN="$WATCOM/binl64"
+          else
+            WATCOM_BIN="$WATCOM/binl"
+          fi
+          export PATH="$WATCOM_BIN:$WATCOM/binw:$PATH"
+          export INCLUDE="$WATCOM/h"
+          export EDPATH="$WATCOM/eddat"
+          export WIPFC="$WATCOM/wipfc"
+
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="5.4.60"
+          fi
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            PKG_VERSION="$VERSION"
+          else
+            PKG_VERSION="5.4.60"
+          fi
+
+          pushd build_dos
+          cpack -C Release -G ZIP -D "CPACK_PACKAGE_VERSION=$PKG_VERSION" -D "CPACK_PACKAGE_FILE_NAME=gawk-${VERSION}-dos32"
+          cp -f gawk.exe "gawk-${VERSION}-dos32.exe"
+          popd
+
+          # Generate patched DOS32A.EXE for legacy MS-DOS 1.25 and 2.0 using vagrant/dos/Vagrantfile
+          ruby -e '
+            load "vagrant/dos/Vagrantfile"
+            raw = File.binread("/opt/watcom/binw/dos32a.exe")
+            File.binwrite("build_dos/dos32a_legacy.exe", MSDOSOpenWatcomCI.patch_dos32a_for_legacy_dos(raw))
+          '
+
+          for dos_target in msdos-1.25 msdos-2.0 msdos-4.0; do
+            stage_dir="build_dos/pkg_${dos_target}/gawk-${VERSION}-${dos_target}"
+            mkdir -p "$stage_dir"
+            cp -f build_dos/gawk.exe "$stage_dir/GAWK.EXE"
+            if [ "$dos_target" = "msdos-4.0" ]; then
+              cp -f /opt/watcom/binw/dos32a.exe "$stage_dir/DOS32A.EXE"
+            else
+              cp -f build_dos/dos32a_legacy.exe "$stage_dir/DOS32A.EXE"
+            fi
+            cp -f README.md LICENSE-APACHE LICENSE-MIT LICENSE-CC0 "$stage_dir/"
+            (cd "build_dos/pkg_${dos_target}" && zip -r "../gawk-${VERSION}-${dos_target}.zip" "gawk-${VERSION}-${dos_target}")
+            rm -rf "build_dos/pkg_${dos_target}"
+          done
+          rm -f build_dos/dos32a_legacy.exe
+          ls -lh build_dos/gawk-*-dos32.exe build_dos/gawk-*-dos32.zip build_dos/gawk-*-msdos-*.zip
+
+      - name: Upload DOS Artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: gawk-dos-packages
+          path: |
+            build_dos/gawk-*-dos32.exe
+            build_dos/gawk-*-dos32.zip
+            build_dos/gawk-*-msdos-1.25.zip
+            build_dos/gawk-*-msdos-2.0.zip
+            build_dos/gawk-*-msdos-4.0.zip
+
+      - name: Publish DOS Packages to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: GNU Awk for Windows & DOS ${{ github.ref_name }}
+          files: |
+            build_dos/gawk-*-dos32.exe
+            build_dos/gawk-*-dos32.zip
+            build_dos/gawk-*-msdos-1.25.zip
+            build_dos/gawk-*-msdos-2.0.zip
+            build_dos/gawk-*-msdos-4.0.zip
+          generate_release_notes: true
