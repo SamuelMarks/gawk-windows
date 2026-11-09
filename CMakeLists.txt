@@ -65,7 +65,7 @@ endif()
 FetchContent_Declare(
     auto_win_msvc
     GIT_REPOSITORY https://github.com/SamuelMarks/auto-win-msvc.git
-    GIT_TAG        e12ccc1e1657eb8d230d7c9d0e9d5ae4f8072326
+    GIT_TAG        5a9b94ed701d09256214624981dce0f54cc549d2
 )
 FetchContent_MakeAvailable(auto_win_msvc)
 
