@@ -14,6 +14,7 @@
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.24)
+cmake_policy(SET CMP0114 NEW)
 cmake_policy(SET CMP0135 NEW)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
@@ -23,8 +24,7 @@ set(GAWK_VERSION "5.4.60")
 
 include(FetchContent)
 include(CTest)
-
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateGawkHeaders.cmake")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "DOS" OR (CMAKE_C_COMPILER_ID MATCHES "Watcom" AND NOT WIN32))
     set(AUTO_WIN_MSVC_SINGLE_THREADED ON CACHE BOOL "Single-threaded DOS mode" FORCE)
@@ -132,16 +132,11 @@ endif()
 
 if(NOT DEFINED GAWK_SOURCE_DIR OR NOT EXISTS "${GAWK_SOURCE_DIR}/awk.h")
     set(GAWK_UPSTREAM_REV "9b2156156f47076b5e588448a89129cc59701a65")
-    FetchContent_Declare(
-        gawk_upstream
-        DOWNLOAD_COMMAND "${Python3_EXECUTABLE}" -m scripts.generate_gawk_headers
-                         "--fetch-gawk"
-                         "--gawk-dir" "<SOURCE_DIR>"
-                         "--gawk-rev" "${GAWK_UPSTREAM_REV}"
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    set(GAWK_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/gawk_upstream-src")
+    gawk_ensure_source(
+        DEST_DIR "${GAWK_SOURCE_DIR}"
+        COMMIT "${GAWK_UPSTREAM_REV}"
     )
-    FetchContent_MakeAvailable(gawk_upstream)
-    set(GAWK_SOURCE_DIR "${gawk_upstream_SOURCE_DIR}")
 endif()
 
 set(BUILD_SHARED_LIBS "${_saved_build_shared_libs}")
@@ -155,21 +150,14 @@ set(GAWK_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/gawk_generated")
 file(MAKE_DIRECTORY "${GAWK_GEN_DIR}")
 
 set(_gen_args
-    "--gawk-dir" "${GAWK_SOURCE_DIR}"
-    "--out-dir" "${GAWK_GEN_DIR}"
+    GAWK_DIR "${GAWK_SOURCE_DIR}"
+    OUT_DIR "${GAWK_GEN_DIR}"
 )
 if(GAWK_TARGET_DOS)
-    list(APPEND _gen_args "--dos")
+    list(APPEND _gen_args TARGET_DOS)
 endif()
 
-execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -m scripts.generate_gawk_headers ${_gen_args}
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    RESULT_VARIABLE _gen_rc
-)
-if(NOT _gen_rc EQUAL 0)
-    message(FATAL_ERROR "Failed to generate gawk headers via scripts/generate_gawk_headers.py")
-endif()
+gawk_generate_build_files(${_gen_args})
 
 # -----------------------------------------------------------------------------
 # 4. Assemble GNU Awk Sources & Compile Target

@@ -1,297 +1,172 @@
-"""Unit tests for ``scripts.generate_gawk_headers``."""
+"""Unit tests for ``cmake/GenerateGawkHeaders.cmake``."""
 
 from __future__ import annotations
 
-import runpy
 import subprocess
 from pathlib import Path
 
-import pytest
-
-from scripts.generate_gawk_headers import (
-    build_config_h,
-    build_dos_compat_c,
-    build_dos_minrx_c,
-    ensure_gawk_source,
-    generate_gawk_build_files,
-    main,
-    parse_ac_init,
-    parse_args,
-)
+CMAKE_SCRIPT = Path(__file__).resolve().parent.parent / "cmake" / "GenerateGawkHeaders.cmake"
 
 
-def test_ensure_gawk_source_already_populated(tmp_path: Path) -> None:
-    """Verify ``ensure_gawk_source`` returns early when ``awk.h`` and ``configure.ac`` exist."""
-    (tmp_path / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
-    (tmp_path / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
-    assert ensure_gawk_source(tmp_path) == tmp_path.resolve()
+def run_cmake_generator(*args: str) -> subprocess.CompletedProcess[str]:
+    """Execute ``cmake/GenerateGawkHeaders.cmake`` in CMake script mode.
 
+    Args:
+        *args: Additional ``-DVAR=VALUE`` arguments passed before ``-P``.
 
-def test_ensure_gawk_source_shallow_and_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify ``ensure_gawk_source`` shallow fetch, git:// clone fallback, and error paths."""
-    dest = tmp_path / "gawk_src"
-    dest.mkdir()
-    (dest / "stale.txt").write_text("stale\n", encoding="utf-8")
-
-    sleep_calls: list[float] = []
-    monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
-
-    # 1. Shallow fetch succeeds on first attempt
-    def fake_run_shallow_ok(
-        cmd: list[str], *_args: object, **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        """Simulate successful git init, shallow fetch, and checkout.
-
-        Args:
-            cmd: Subprocess command list.
-
-        Returns:
-            Simulated CompletedProcess.
-        """
-        if "checkout" in cmd:
-            (dest / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
-            (dest / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run_shallow_ok)
-    assert (
-        ensure_gawk_source(
-            dest,
-            commit="deadbeef",
-            repo_urls=("https://https.git.savannah.gnu.org/git/gawk.git",),
-            retries_per_url=1,
-            retry_delay_sec=0.0,
-        )
-        == dest.resolve()
-    )
-
-    # 2. Shallow fetch fails, shallow checkout fails, git:// clone fails, git:// checkout fails,
-    #    then git:// checkout succeeds on 2nd attempt
-    (dest / "awk.h").unlink()
-    git_clone_attempts = 0
-    https_attempts = 0
-
-    def fake_run_multi(
-        cmd: list[str], *_args: object, **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        """Simulate failing shallow fetch/checkout followed by git:// fallback.
-
-        Args:
-            cmd: Subprocess command list.
-
-        Returns:
-            Simulated CompletedProcess.
-        """
-        nonlocal git_clone_attempts, https_attempts
-        if "init" in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-        if "fetch" in cmd:
-            https_attempts += 1
-            if https_attempts == 1:
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=128, stdout="", stderr="HTTP 500"
-                )
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-        if "clone" in cmd:
-            git_clone_attempts += 1
-            if git_clone_attempts == 1:
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=128, stdout="", stderr="clone err"
-                )
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-        if "FETCH_HEAD" in cmd:
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr="checkout fetch_head err"
-            )
-        if git_clone_attempts == 2:
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr="checkout commit err"
-            )
-        (dest / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
-        (dest / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run_multi)
-    res_path = ensure_gawk_source(
-        dest,
-        commit="deadbeef",
-        repo_urls=(
-            "https://https.git.savannah.gnu.org/git/gawk.git",
-            "git://git.savannah.gnu.org/gawk.git",
-        ),
-        retries_per_url=3,
-        retry_delay_sec=0.5,
-    )
-    assert res_path == dest.resolve()
-    assert len(sleep_calls) >= 4
-
-    # 3. Exhausting all URLs raises RuntimeError, including when dest does not initially exist
-    missing_dest = tmp_path / "fresh_dest"
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, *_a, **_kw: subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr="fatal"
-        ),
-    )
-    with pytest.raises(RuntimeError, match="Failed to fetch upstream gawk"):
-        ensure_gawk_source(
-            missing_dest,
-            commit="deadbeef",
-            repo_urls=("https://https.git.savannah.gnu.org/git/gawk.git",),
-            retries_per_url=1,
-            retry_delay_sec=0.0,
-        )
-
-    # 4. Empty repo_urls raises RuntimeError
-    with pytest.raises(RuntimeError, match="no repository URLs configured"):
-        ensure_gawk_source(missing_dest, commit="deadbeef", repo_urls=(), retries_per_url=1)
-
-
-def test_parse_ac_init_valid_and_fallback() -> None:
-    """Verify ``parse_ac_init`` extracts metadata from ``AC_INIT`` and falls back cleanly."""
-    sample = "AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk])\n"
-    assert parse_ac_init(sample) == ("GNU Awk", "5.4.60", "bug-gawk@gnu.org", "gawk")
-    assert parse_ac_init("dnl empty file\n") == (
-        "GNU Awk",
-        "5.4.60",
-        "bug-gawk@gnu.org",
-        "gawk",
+    Returns:
+        CompletedProcess containing stdout, stderr, and return code.
+    """
+    return subprocess.run(
+        ["cmake", *args, "-P", str(CMAKE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
-def test_build_config_h_windows_and_dos() -> None:
-    """Verify ``build_config_h`` produces expected macros for Windows and DOS modes."""
-    win_cfg = build_config_h("GNU Awk", "5.4.60", "bug-gawk@gnu.org", "gawk", target_dos=False)
+def test_cmake_generate_windows_and_dos(tmp_path: Path) -> None:
+    """Verify ``GenerateGawkHeaders.cmake`` generates expected Windows and DOS build files.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    gawk_dir = tmp_path / "gawk"
+    pc_dir = gawk_dir / "pc"
+    support_dir = gawk_dir / "support"
+    pc_dir.mkdir(parents=True)
+    support_dir.mkdir(parents=True)
+
+    nl = chr(10)
+    tab = chr(9)
+
+    (gawk_dir / "awk.h").write_text(f"/* awk.h */{nl}", encoding="utf-8")
+    (gawk_dir / "configure.ac").write_text(
+        f"AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk]){nl}",
+        encoding="utf-8",
+    )
+    (pc_dir / "popen.c").write_text(f"/* popen body */{nl}", encoding="utf-8")
+    (gawk_dir / "io.c").write_text(f"/* io body */{nl}", encoding="utf-8")
+    for hdr in ("langinfo.h", "dlfcn.h", "socket.h", "in.h", "popen.h", "mbc32.h"):
+        (pc_dir / hdr).write_text(f"/* {hdr} */{nl}", encoding="utf-8")
+
+    sample_minrx = nl.join(
+        [
+            "struct QVecInsert {",
+            f"{tab}bool newly;",
+            f"{tab}NState *newnsp;",
+            "};",
+            "static QVecInsert foo(QVec *q, size_t k) {",
+            "    bool newly = true;",
+            "    return LITERAL(QVecInsert) {newly, &q->storage[k]};",
+            "}",
+            "struct Subexp {",
+            f"{tab}NodeList nodes;",
+            f"{tab}size_t maxstk;",
+            f"{tab}bool hasmin;",
+            "};",
+            "static Subexp bar(Subexp lh) {",
+            "    if (lh.maxstk == 0)",
+            "        return LITERAL(Subexp) {{NULL, NULL, 0}, 0, false};",
+            "    return LITERAL(Subexp) {lh.nodes, lh.maxstk, lh.hasmin };",
+            "}",
+            "",
+        ]
+    )
+    (support_dir / "minrx.c").write_text(sample_minrx, encoding="utf-8")
+
+    # 1. Native Windows generation
+    out_win = tmp_path / "out_win"
+    res_win = run_cmake_generator(f"-DGAWK_DIR={gawk_dir}", f"-DOUT_DIR={out_win}")
+    assert res_win.returncode == 0, res_win.stderr
+    win_cfg = (out_win / "config.h").read_text(encoding="utf-8")
     assert '#define PACKAGE_STRING "GNU Awk 5.4.60"' in win_cfg
     assert "#define DYNAMIC 1" in win_cfg
     assert "#define __MINGW32__ 1" in win_cfg
     assert "#define _UCRT 1" in win_cfg
-
-    dos_cfg = build_config_h("GNU Awk", "5.4.60", "bug-gawk@gnu.org", "gawk", target_dos=True)
-    assert "#define PIPES_SIMULATED 1" in dos_cfg
-    assert "#undef DYNAMIC" in dos_cfg
-    assert "#undef HAVE_SOCKETS" in dos_cfg
-    assert "#include <stdbool.h>" in dos_cfg
-
-
-def test_build_dos_compat_c(tmp_path: Path) -> None:
-    """Verify ``build_dos_compat_c`` includes DOS OS functions and ``pc/`` paths."""
-    pc_dir = tmp_path / "pc"
-    pc_dir.mkdir(parents=True, exist_ok=True)
-    (pc_dir / "popen.c").write_text("/* popen body */\n", encoding="utf-8")
-    src_text = build_dos_compat_c(tmp_path)
-    assert "gawk_name(const char *filespec)" in src_text
-    assert "nl_langinfo(int item)" in src_text
-    assert "/* popen body */" in src_text
-
-
-def test_build_dos_minrx_c(tmp_path: Path) -> None:
-    """Verify ``build_dos_minrx_c`` lowers C99 compound literals in ``minrx.c``."""
-    assert build_dos_minrx_c(tmp_path) == ""
-    support_dir = tmp_path / "support"
-    support_dir.mkdir(parents=True, exist_ok=True)
-    sample_minrx = (
-        "struct QVecInsert {\n\tbool newly;\n\tNState *newnsp;\n};\n"
-        "static QVecInsert foo(QVec *q, size_t k) {\n"
-        "    bool newly = true;\n"
-        "    return LITERAL(QVecInsert) {newly, &q->storage[k]};\n"
-        "}\n"
-        "struct Subexp {\n\tNodeList nodes;\n\tsize_t maxstk;\n\tbool hasmin;\n};\n"
-        "static Subexp bar(Subexp lh) {\n"
-        "    if (lh.maxstk == 0)\n"
-        "        return LITERAL(Subexp) {{NULL, NULL, 0}, 0, false};\n"
-        "    return LITERAL(Subexp) {lh.nodes, lh.maxstk, lh.hasmin};\n"
-        "}\n"
-    )
-    (support_dir / "minrx.c").write_text(sample_minrx, encoding="utf-8")
-    lowered = build_dos_minrx_c(tmp_path)
-    assert "awm_make_QVecInsert(newly, &q->storage[k])" in lowered
-    assert "awm_make_Subexp_empty()" in lowered
-    assert "awm_make_Subexp(lh.nodes, lh.maxstk, lh.hasmin)" in lowered
-    assert "LITERAL(Subexp)" not in lowered
-    (support_dir / "minrx.c").write_text(lowered, encoding="utf-8")
-    assert build_dos_minrx_c(tmp_path) == lowered
-
-
-def test_generate_gawk_build_files_windows_and_dos(tmp_path: Path) -> None:
-    """Verify ``generate_gawk_build_files`` writes headers for Windows and DOS targets."""
-    gawk_dir = tmp_path / "gawk"
-    pc_dir = gawk_dir / "pc"
-    pc_dir.mkdir(parents=True)
-    (gawk_dir / "configure.ac").write_text(
-        "AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk])\n",
-        encoding="utf-8",
-    )
-    for hdr in ("langinfo.h", "dlfcn.h", "socket.h", "in.h", "popen.h", "mbc32.h"):
-        (pc_dir / hdr).write_text(f"/* {hdr} */\n", encoding="utf-8")
-
-    out_win = tmp_path / "out_win"
-    generate_gawk_build_files(gawk_dir, out_win, target_dos=False)
-    assert (out_win / "config.h").is_file()
     assert (out_win / "langinfo.h").is_file()
     assert (out_win / "unistd.h").is_file()
     assert (out_win / "strings.h").is_file()
     assert (out_win / "sys" / "time.h").is_file()
     assert (out_win / "sys" / "param.h").is_file()
 
+    # 2. 32-bit DOS generation
     out_dos = tmp_path / "out_dos"
-    generate_gawk_build_files(gawk_dir, out_dos, target_dos=True)
-    assert (out_dos / "config.h").is_file()
-    assert (out_dos / "gawk_dos_compat.c").is_file()
-    assert (out_dos / "gawk_dos_minrx.c").is_file()
+    res_dos = run_cmake_generator(
+        f"-DGAWK_DIR={gawk_dir}",
+        f"-DOUT_DIR={out_dos}",
+        "-DTARGET_DOS=ON",
+    )
+    assert res_dos.returncode == 0, res_dos.stderr
+    dos_cfg = (out_dos / "config.h").read_text(encoding="utf-8")
+    assert "#define PIPES_SIMULATED 1" in dos_cfg
+    assert "#undef DYNAMIC" in dos_cfg
+    assert "#undef HAVE_SOCKETS" in dos_cfg
+    assert "#include <stdbool.h>" in dos_cfg
+
+    dos_compat = (out_dos / "gawk_dos_compat.c").read_text(encoding="utf-8")
+    assert "gawk_name(const char *filespec)" in dos_compat
+    assert "nl_langinfo(int item)" in dos_compat
+    assert "/* popen body */" in dos_compat
+
+    dos_minrx = (out_dos / "gawk_dos_minrx.c").read_text(encoding="utf-8")
+    assert "awm_make_QVecInsert(newly, &q->storage[k])" in dos_minrx
+    assert "awm_make_Subexp_empty()" in dos_minrx
+    assert "awm_make_Subexp(lh.nodes, lh.maxstk, lh.hasmin)" in dos_minrx
+    assert "LITERAL(Subexp)" not in dos_minrx
+
+    dos_io = (out_dos / "gawk_dos_io.c").read_text(encoding="utf-8")
+    assert "/* io body */" in dos_io
+    assert "wait_any_block_signals" in dos_io
 
 
-def test_generate_gawk_build_files_missing_configure(tmp_path: Path) -> None:
-    """Verify ``generate_gawk_build_files`` raises ``FileNotFoundError`` when missing."""
-    with pytest.raises(FileNotFoundError):
-        generate_gawk_build_files(tmp_path / "nonexistent", tmp_path / "out")
+def test_cmake_fallback_ac_init_and_error_paths(tmp_path: Path) -> None:
+    """Verify AC_INIT fallback, already-populated fetch, and script-mode error conditions.
 
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    nl = chr(10)
 
-def test_parse_args_and_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify ``parse_args`` and ``main`` return codes for valid, fetch, and missing paths."""
-    gawk_dir = tmp_path / "gawk"
+    # Missing GAWK_DIR
+    res_no_gawk = run_cmake_generator()
+    assert res_no_gawk.returncode != 0
+    assert "GAWK_DIR is required" in res_no_gawk.stderr
+
+    # Missing OUT_DIR and FETCH_GAWK
+    gawk_dir = tmp_path / "gawk_fallback"
     gawk_dir.mkdir()
-    (gawk_dir / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
-    (gawk_dir / "configure.ac").write_text(
-        "AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk])\n",
-        encoding="utf-8",
+    res_no_out = run_cmake_generator(f"-DGAWK_DIR={gawk_dir}")
+    assert res_no_out.returncode != 0
+    assert "OUT_DIR is required" in res_no_out.stderr
+
+    # Missing configure.ac
+    out_dir = tmp_path / "out_fallback"
+    res_missing_ac = run_cmake_generator(f"-DGAWK_DIR={gawk_dir}", f"-DOUT_DIR={out_dir}")
+    assert res_missing_ac.returncode != 0
+    assert "configure.ac not found" in res_missing_ac.stderr
+
+    # Fallback when configure.ac has no AC_INIT match
+    (gawk_dir / "awk.h").write_text(f"/* awk.h */{nl}", encoding="utf-8")
+    (gawk_dir / "configure.ac").write_text(f"dnl no AC_INIT here{nl}", encoding="utf-8")
+    res_fb = run_cmake_generator(
+        f"-DGAWK_DIR={gawk_dir}",
+        f"-DOUT_DIR={out_dir}",
+        "-DFETCH_GAWK=ON",
     )
-    out_dir = tmp_path / "out"
+    assert res_fb.returncode == 0, res_fb.stderr
+    cfg_text = (out_dir / "config.h").read_text(encoding="utf-8")
+    assert '#define PACKAGE_STRING "GNU Awk 5.4.60"' in cfg_text
 
-    parsed = parse_args(["--gawk-dir", str(gawk_dir), "--out-dir", str(out_dir), "--dos"])
-    assert parsed.gawk_dir == gawk_dir
-    assert parsed.out_dir == out_dir
-    assert parsed.dos is True
-
-    assert main(["--gawk-dir", str(gawk_dir), "--out-dir", str(out_dir)]) == 0
-    assert main(["--gawk-dir", str(gawk_dir), "--fetch-gawk"]) == 0
-    assert main(["--gawk-dir", str(gawk_dir)]) == 1
-    assert main(["--gawk-dir", str(tmp_path / "missing"), "--out-dir", str(out_dir)]) == 1
-
-    monkeypatch.setattr(
-        "scripts.generate_gawk_headers.ensure_gawk_source",
-        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("fetch failed")),
+    # Fetch failure when pointing at an invalid local repository URL
+    empty_dest = tmp_path / "fetch_fail_dest"
+    res_fetch_fail = run_cmake_generator(
+        f"-DGAWK_DIR={empty_dest}",
+        "-DFETCH_GAWK=ON",
+        "-DGAWK_REV=deadbeef",
+        f"-DGAWK_REPO_URLS={tmp_path / 'nonexistent_repo.git'}",
+        "-DGAWK_RETRIES_PER_URL=1",
+        "-DGAWK_RETRY_DELAY_SEC=0",
     )
-    assert main(["--gawk-dir", str(gawk_dir), "--fetch-gawk"]) == 1
-
-
-def test_module_main_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify ``__main__`` entry point execution via ``runpy``."""
-    gawk_dir = tmp_path / "gawk"
-    gawk_dir.mkdir()
-    (gawk_dir / "configure.ac").write_text(
-        "AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk])\n",
-        encoding="utf-8",
-    )
-    out_dir = tmp_path / "out"
-    monkeypatch.setattr(
-        "sys.argv",
-        ["generate_gawk_headers.py", "--gawk-dir", str(gawk_dir), "--out-dir", str(out_dir)],
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("scripts.generate_gawk_headers", run_name="__main__")
-    assert exc_info.value.code == 0
+    assert res_fetch_fail.returncode != 0
+    assert "Failed to fetch upstream gawk" in res_fetch_fail.stderr

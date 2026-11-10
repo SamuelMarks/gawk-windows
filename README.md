@@ -13,7 +13,7 @@ This repository provides **native Windows builds** (compiled with Microsoft Visu
 ## Features & Architecture
 
 - **Zero Upstream Source Modifications**: All upstream `.c` and `.h` files in `../gawk` remain 100% untouched.
-- **No Checked-in `.c` or `.h` Files**: Enforced via the `forbid-c-headers-and-sources` pre-commit hook. All POSIX/BSD/Linux polyfills come from `auto-win-msvc`, and build-time headers (`config.h`, forwarding headers, and DOS wrappers) are deterministically generated into the CMake build directory by `scripts/generate_gawk_headers.py`.
+- **No Checked-in `.c` or `.h` Files**: Enforced via the `forbid-c-headers-and-sources` pre-commit hook. All POSIX/BSD/Linux polyfills come from `auto-win-msvc`, and build-time headers (`config.h`, forwarding headers, and DOS wrappers) are deterministically generated into the CMake build directory by `cmake/GenerateGawkHeaders.cmake`.
 - **Native Windows (MSVC `cl.exe`)**:
   - Activates upstream `gawk` Win32 support (`pc/gawkmisc.pc`, `pc/mbc32.c`, `pc/popen.c`, `pc/dlfcn.h`, `pc/socket.h`) and links against `auto-win-msvc`, `ws2_32.lib`, `kernel32.lib`, `user32.lib`, and `advapi32.lib`.
   - Optional dynamic extensions (`-DGAWK_BUILD_EXTENSIONS=ON`: `ordchr.dll`, `readfile.dll`, `revoutput.dll`, `revtwoway.dll`, `rwarray.dll`, `intdiv.dll`, `time.dll`, `fnmatch.dll`, `inplace.dll`).
