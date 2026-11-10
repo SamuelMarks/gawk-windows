@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: 5a9b94ed701d09256214624981dce0f54cc549d2
+          ref: e4591c52478e3050731205d18cfaba027269bd8c
           path: auto-win-msvc
 
       - name: Setup Python
@@ -71,7 +71,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: 5a9b94ed701d09256214624981dce0f54cc549d2
+          ref: e4591c52478e3050731205d18cfaba027269bd8c
           path: auto-win-msvc
 
       - name: Setup Python
@@ -192,7 +192,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: 5a9b94ed701d09256214624981dce0f54cc549d2
+          ref: e4591c52478e3050731205d18cfaba027269bd8c
           path: auto-win-msvc
 
       - name: Setup Python

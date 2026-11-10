@@ -1,1 +1,1 @@
-"""Build, header generation, and coverage shield scripts for jq-windows."""
+"""Build, header generation, and coverage shield scripts for gawk-windows."""

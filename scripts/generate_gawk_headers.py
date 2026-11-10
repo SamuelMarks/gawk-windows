@@ -5,14 +5,136 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
+import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
+
+DEFAULT_GAWK_REV = "9b2156156f47076b5e588448a89129cc59701a65"
+DEFAULT_GAWK_REPOS: tuple[str, ...] = (
+    "https://https.git.savannah.gnu.org/git/gawk.git",
+    "https://git.savannah.gnu.org/git/gawk.git",
+    "git://git.savannah.gnu.org/gawk.git",
+)
 
 AC_INIT_RE = re.compile(
     r"^AC_INIT\(\[?([^],]+)\]?,\s*\[?([^],]+)\]?,\s*\[?([^],]+)\]?,\s*\[?([^],)]+)\]?",
     re.MULTILINE,
 )
+
+
+def ensure_gawk_source(
+    dest_dir: Path,
+    commit: str = DEFAULT_GAWK_REV,
+    repo_urls: Sequence[str] = DEFAULT_GAWK_REPOS,
+    retries_per_url: int = 3,
+    retry_delay_sec: float = 2.0,
+) -> Path:
+    """Ensure upstream ``gawk`` source is checked out at ``dest_dir``.
+
+    Performs a fast ``git init`` + ``git fetch --depth 1 <url> <commit>`` +
+    ``git checkout --force FETCH_HEAD`` against the direct Savannah HTTPS
+    endpoint first, avoiding 70 MB un-shallowed history clones and ``git.savannah.gnu.org``
+    HTTP 500 gateway timeouts on Windows CI runners. Falls back to a full clone
+    over ``git://`` or alternate mirrors with exponential backoff if shallow
+    fetching fails.
+
+    Args:
+        dest_dir: Destination directory where upstream ``gawk`` will be populated.
+        commit: Exact upstream Git commit SHA or tag to check out.
+        repo_urls: Ordered sequence of upstream Git repository URLs to try.
+        retries_per_url: Number of attempts per repository URL before advancing.
+        retry_delay_sec: Base delay in seconds between retry attempts.
+
+    Returns:
+        Resolved path to ``dest_dir``.
+
+    Raises:
+        RuntimeError: If all repository URLs and retry attempts fail to populate ``awk.h``.
+    """
+    resolved = dest_dir.resolve()
+    if (resolved / "awk.h").is_file() and (resolved / "configure.ac").is_file():
+        return resolved
+
+    errors: list[str] = []
+    for url in repo_urls:
+        for attempt in range(1, retries_per_url + 1):
+            if resolved.exists():
+                shutil.rmtree(resolved, ignore_errors=True)
+            resolved.mkdir(parents=True, exist_ok=True)
+
+            if not url.startswith("git://"):
+                init_res = subprocess.run(
+                    ["git", "init", str(resolved)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                fetch_res = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(resolved),
+                        "-c",
+                        "http.lowSpeedLimit=1000",
+                        "-c",
+                        "http.lowSpeedTime=30",
+                        "fetch",
+                        "--depth",
+                        "1",
+                        "--no-tags",
+                        url,
+                        commit,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if init_res.returncode == 0 and fetch_res.returncode == 0:
+                    checkout_res = subprocess.run(
+                        ["git", "-C", str(resolved), "checkout", "--force", "FETCH_HEAD"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if checkout_res.returncode == 0 and (resolved / "awk.h").is_file():
+                        return resolved
+                    errors.append(
+                        f"{url} (shallow checkout attempt {attempt}): {checkout_res.stderr.strip()}"
+                    )
+                else:
+                    errors.append(
+                        f"{url} (shallow fetch attempt {attempt}): {fetch_res.stderr.strip()}"
+                    )
+            else:
+                clone_res = subprocess.run(
+                    ["git", "clone", "--no-checkout", url, str(resolved)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if clone_res.returncode == 0:
+                    checkout_res = subprocess.run(
+                        ["git", "-C", str(resolved), "checkout", "--force", commit],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if checkout_res.returncode == 0 and (resolved / "awk.h").is_file():
+                        return resolved
+                    errors.append(
+                        f"{url} (clone checkout attempt {attempt}): {checkout_res.stderr.strip()}"
+                    )
+                else:
+                    errors.append(f"{url} (clone attempt {attempt}): {clone_res.stderr.strip()}")
+
+            if retry_delay_sec > 0:
+                time.sleep(retry_delay_sec * attempt)
+
+    joined_errors = "; ".join(errors) if errors else "no repository URLs configured"
+    raise RuntimeError(f"Failed to fetch upstream gawk ({commit}): {joined_errors}")
 
 
 def parse_ac_init(configure_ac_text: str) -> tuple[str, str, str, str]:
@@ -833,13 +955,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        required=True,
+        default=None,
         help="Output directory for generated headers and sources.",
     )
     parser.add_argument(
         "--dos",
         action="store_true",
         help="Generate configuration and shims for 32-bit Protected-Mode DOS.",
+    )
+    parser.add_argument(
+        "--fetch-gawk",
+        action="store_true",
+        help="Shallow-fetch upstream gawk into --gawk-dir with multi-mirror retry.",
+    )
+    parser.add_argument(
+        "--gawk-rev",
+        type=str,
+        default=DEFAULT_GAWK_REV,
+        help="Upstream gawk Git commit SHA or tag to fetch when --fetch-gawk is used.",
     )
     return parser.parse_args(argv)
 
@@ -854,9 +987,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         Exit status code (``0`` on success, ``1`` on error).
     """
     args = parse_args(argv)
+    if args.out_dir is None and not args.fetch_gawk:
+        print("Error: --out-dir is required unless --fetch-gawk is specified", file=sys.stderr)
+        return 1
     try:
-        generate_gawk_build_files(args.gawk_dir, args.out_dir, target_dos=args.dos)
-    except FileNotFoundError as exc:
+        if args.fetch_gawk:
+            ensure_gawk_source(args.gawk_dir, commit=args.gawk_rev)
+        if args.out_dir is not None:
+            generate_gawk_build_files(args.gawk_dir, args.out_dir, target_dos=args.dos)
+    except (FileNotFoundError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

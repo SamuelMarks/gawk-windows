@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import runpy
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,11 +12,143 @@ from scripts.generate_gawk_headers import (
     build_config_h,
     build_dos_compat_c,
     build_dos_minrx_c,
+    ensure_gawk_source,
     generate_gawk_build_files,
     main,
     parse_ac_init,
     parse_args,
 )
+
+
+def test_ensure_gawk_source_already_populated(tmp_path: Path) -> None:
+    """Verify ``ensure_gawk_source`` returns early when ``awk.h`` and ``configure.ac`` exist."""
+    (tmp_path / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
+    (tmp_path / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
+    assert ensure_gawk_source(tmp_path) == tmp_path.resolve()
+
+
+def test_ensure_gawk_source_shallow_and_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ``ensure_gawk_source`` shallow fetch, git:// clone fallback, and error paths."""
+    dest = tmp_path / "gawk_src"
+    dest.mkdir()
+    (dest / "stale.txt").write_text("stale\n", encoding="utf-8")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
+
+    # 1. Shallow fetch succeeds on first attempt
+    def fake_run_shallow_ok(
+        cmd: list[str], *_args: object, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        """Simulate successful git init, shallow fetch, and checkout.
+
+        Args:
+            cmd: Subprocess command list.
+
+        Returns:
+            Simulated CompletedProcess.
+        """
+        if "checkout" in cmd:
+            (dest / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
+            (dest / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_shallow_ok)
+    assert (
+        ensure_gawk_source(
+            dest,
+            commit="deadbeef",
+            repo_urls=("https://https.git.savannah.gnu.org/git/gawk.git",),
+            retries_per_url=1,
+            retry_delay_sec=0.0,
+        )
+        == dest.resolve()
+    )
+
+    # 2. Shallow fetch fails, shallow checkout fails, git:// clone fails, git:// checkout fails,
+    #    then git:// checkout succeeds on 2nd attempt
+    (dest / "awk.h").unlink()
+    git_clone_attempts = 0
+    https_attempts = 0
+
+    def fake_run_multi(
+        cmd: list[str], *_args: object, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        """Simulate failing shallow fetch/checkout followed by git:// fallback.
+
+        Args:
+            cmd: Subprocess command list.
+
+        Returns:
+            Simulated CompletedProcess.
+        """
+        nonlocal git_clone_attempts, https_attempts
+        if "init" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "fetch" in cmd:
+            https_attempts += 1
+            if https_attempts == 1:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=128, stdout="", stderr="HTTP 500"
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "clone" in cmd:
+            git_clone_attempts += 1
+            if git_clone_attempts == 1:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=128, stdout="", stderr="clone err"
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "FETCH_HEAD" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="checkout fetch_head err"
+            )
+        if git_clone_attempts == 2:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="checkout commit err"
+            )
+        (dest / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
+        (dest / "configure.ac").write_text("AC_INIT\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_multi)
+    res_path = ensure_gawk_source(
+        dest,
+        commit="deadbeef",
+        repo_urls=(
+            "https://https.git.savannah.gnu.org/git/gawk.git",
+            "git://git.savannah.gnu.org/gawk.git",
+        ),
+        retries_per_url=3,
+        retry_delay_sec=0.5,
+    )
+    assert res_path == dest.resolve()
+    assert len(sleep_calls) >= 4
+
+    # 3. Exhausting all URLs raises RuntimeError, including when dest does not initially exist
+    missing_dest = tmp_path / "fresh_dest"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, *_a, **_kw: subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="fatal"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="Failed to fetch upstream gawk"):
+        ensure_gawk_source(
+            missing_dest,
+            commit="deadbeef",
+            repo_urls=("https://https.git.savannah.gnu.org/git/gawk.git",),
+            retries_per_url=1,
+            retry_delay_sec=0.0,
+        )
+
+    # 4. Empty repo_urls raises RuntimeError
+    with pytest.raises(RuntimeError, match="no repository URLs configured"):
+        ensure_gawk_source(missing_dest, commit="deadbeef", repo_urls=(), retries_per_url=1)
 
 
 def test_parse_ac_init_valid_and_fallback() -> None:
@@ -118,10 +251,11 @@ def test_generate_gawk_build_files_missing_configure(tmp_path: Path) -> None:
         generate_gawk_build_files(tmp_path / "nonexistent", tmp_path / "out")
 
 
-def test_parse_args_and_main(tmp_path: Path) -> None:
-    """Verify ``parse_args`` and ``main`` return codes for valid and missing paths."""
+def test_parse_args_and_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify ``parse_args`` and ``main`` return codes for valid, fetch, and missing paths."""
     gawk_dir = tmp_path / "gawk"
     gawk_dir.mkdir()
+    (gawk_dir / "awk.h").write_text("/* awk.h */\n", encoding="utf-8")
     (gawk_dir / "configure.ac").write_text(
         "AC_INIT([GNU Awk],[5.4.60],[bug-gawk@gnu.org],[gawk])\n",
         encoding="utf-8",
@@ -134,7 +268,15 @@ def test_parse_args_and_main(tmp_path: Path) -> None:
     assert parsed.dos is True
 
     assert main(["--gawk-dir", str(gawk_dir), "--out-dir", str(out_dir)]) == 0
+    assert main(["--gawk-dir", str(gawk_dir), "--fetch-gawk"]) == 0
+    assert main(["--gawk-dir", str(gawk_dir)]) == 1
     assert main(["--gawk-dir", str(tmp_path / "missing"), "--out-dir", str(out_dir)]) == 1
+
+    monkeypatch.setattr(
+        "scripts.generate_gawk_headers.ensure_gawk_source",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("fetch failed")),
+    )
+    assert main(["--gawk-dir", str(gawk_dir), "--fetch-gawk"]) == 1
 
 
 def test_module_main_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

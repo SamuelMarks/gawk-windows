@@ -65,7 +65,7 @@ endif()
 FetchContent_Declare(
     auto_win_msvc
     GIT_REPOSITORY https://github.com/SamuelMarks/auto-win-msvc.git
-    GIT_TAG        5a9b94ed701d09256214624981dce0f54cc549d2
+    GIT_TAG        e4591c52478e3050731205d18cfaba027269bd8c
 )
 FetchContent_MakeAvailable(auto_win_msvc)
 
@@ -131,10 +131,14 @@ if(NOT DEFINED GAWK_SOURCE_DIR)
 endif()
 
 if(NOT DEFINED GAWK_SOURCE_DIR OR NOT EXISTS "${GAWK_SOURCE_DIR}/awk.h")
+    set(GAWK_UPSTREAM_REV "9b2156156f47076b5e588448a89129cc59701a65")
     FetchContent_Declare(
         gawk_upstream
-        GIT_REPOSITORY https://git.savannah.gnu.org/git/gawk.git
-        GIT_TAG        9b2156156f47076b5e588448a89129cc59701a65
+        DOWNLOAD_COMMAND "${Python3_EXECUTABLE}" -m scripts.generate_gawk_headers
+                         "--fetch-gawk"
+                         "--gawk-dir" "<SOURCE_DIR>"
+                         "--gawk-rev" "${GAWK_UPSTREAM_REV}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
     FetchContent_MakeAvailable(gawk_upstream)
     set(GAWK_SOURCE_DIR "${gawk_upstream_SOURCE_DIR}")

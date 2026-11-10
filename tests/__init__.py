@@ -1,1 +1,1 @@
-"""Unit tests for jq-windows scripts."""
+"""Unit tests for gawk-windows scripts."""
