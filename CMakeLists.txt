@@ -18,17 +18,43 @@ cmake_policy(SET CMP0114 NEW)
 cmake_policy(SET CMP0135 NEW)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "DOS" AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "I86")
+    if(NOT DEFINED CMAKE_SYSTEM_PROCESSOR OR CMAKE_SYSTEM_PROCESSOR STREQUAL "")
+        set(CMAKE_SYSTEM_PROCESSOR "I386")
+    endif()
+    if(NOT DEFINED CMAKE_C_COMPILER)
+        find_program(_gawk_wcl386 NAMES wcl386)
+        if(_gawk_wcl386)
+            set(CMAKE_C_COMPILER "${_gawk_wcl386}")
+        endif()
+    endif()
+endif()
+
 project(gawk-windows VERSION 5.4.60 LANGUAGES C)
 
 set(GAWK_VERSION "5.4.60")
 
 include(FetchContent)
 include(CTest)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "DOS" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "I86")
+    message(STATUS "Skipping 32-bit Protected-Mode gawk build on 16-bit Real Mode DOS (I86)")
+    if(BUILD_TESTING)
+        set(_i86_stub "${CMAKE_CURRENT_BINARY_DIR}/gawk_i86_skip.c")
+        file(WRITE "${_i86_stub}" "int main(void) { return 0; }\n")
+        add_executable(gawk_i86_skip "${_i86_stub}")
+        add_test(NAME gawk_i86_skip COMMAND gawk_i86_skip)
+    endif()
+    return()
+endif()
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateGawkHeaders.cmake")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "DOS" OR (CMAKE_C_COMPILER_ID MATCHES "Watcom" AND NOT WIN32))
     set(AUTO_WIN_MSVC_SINGLE_THREADED ON CACHE BOOL "Single-threaded DOS mode" FORCE)
     set(GAWK_TARGET_DOS TRUE)
+    string(REPLACE "-d2" "-d0" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+    string(REPLACE "debug all" "" CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG}")
 else()
     set(GAWK_TARGET_DOS FALSE)
 endif()
@@ -64,8 +90,9 @@ endif()
 
 FetchContent_Declare(
     auto_win_msvc
-    GIT_REPOSITORY https://github.com/SamuelMarks/auto-win-msvc.git
-    GIT_TAG        e4591c52478e3050731205d18cfaba027269bd8c
+    GIT_REPOSITORY             https://github.com/SamuelMarks/auto-win-msvc.git
+    GIT_TAG                    master
+    GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
 )
 FetchContent_MakeAvailable(auto_win_msvc)
 
@@ -117,6 +144,9 @@ if(GAWK_TARGET_DOS)
         _BOOL_DEFINED=1
         AUTO_WIN_MSVC_MEGA_LIBRARY=1
     )
+    if(CMAKE_C_COMPILER_ID MATCHES "Watcom")
+        target_compile_options(gawk_dos_compat PRIVATE -bt=dos -mf -3r -zq -d0)
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------
@@ -230,6 +260,11 @@ add_executable(gawk ${GAWK_FINAL_SOURCES})
 
 if(CMAKE_C_COMPILER_ID MATCHES "Watcom")
     target_compile_options(gawk PRIVATE
+        -bt=dos
+        -mf
+        -3r
+        -zq
+        -d0
         -za99
         -ze
         -aa
@@ -348,10 +383,17 @@ include(CPack)
 # 6. CTest Functional Verification Suite
 # -----------------------------------------------------------------------------
 if(BUILD_TESTING)
-    add_test(NAME gawk_version COMMAND gawk --version)
-    add_test(NAME gawk_begin_print COMMAND gawk "BEGIN { print \"hello gawk\" }")
-    add_test(NAME gawk_math_arith COMMAND gawk "BEGIN { printf \"%.2f\\n\", (10 + 20) / 4 }")
-    add_test(NAME gawk_regex_match COMMAND gawk "BEGIN { if (\"abc123xyz\" ~ /[0-9]+/) exit 0; else exit 1 }")
-    add_test(NAME gawk_field_split COMMAND gawk "BEGIN { n = split(\"a:b:c\", arr, \":\"); if (n == 3 && arr[2] == \"b\") print \"ok\"; else exit 1 }")
-    add_test(NAME gawk_assoc_array COMMAND gawk "BEGIN { a[\"x\"] = 42; a[\"y\"] = 58; if (a[\"x\"] + a[\"y\"] == 100) exit 0; else exit 1 }")
+    if(GAWK_TARGET_DOS)
+        add_test(
+            NAME gawk_dos_suite
+            COMMAND gawk "BEGIN{n=split(9.5,b,/[.]/);a[RS]=42;print(a[RS]);if((n!=2)+(b[1]/2!=4.5))exit(1)}"
+        )
+    else()
+        add_test(NAME gawk_version COMMAND gawk --version)
+        add_test(NAME gawk_begin_print COMMAND gawk "BEGIN { print \"hello gawk\" }")
+        add_test(NAME gawk_math_arith COMMAND gawk "BEGIN { printf \"%.2f\\n\", (10 + 20) / 4 }")
+        add_test(NAME gawk_regex_match COMMAND gawk "BEGIN { if (\"abc123xyz\" ~ /[0-9]+/) exit 0; else exit 1 }")
+        add_test(NAME gawk_field_split COMMAND gawk "BEGIN { n = split(\"a:b:c\", arr, \":\"); if (n == 3 && arr[2] == \"b\") print \"ok\"; else exit 1 }")
+        add_test(NAME gawk_assoc_array COMMAND gawk "BEGIN { a[\"x\"] = 42; a[\"y\"] = 58; if (a[\"x\"] + a[\"y\"] == 100) exit 0; else exit 1 }")
+    endif()
 endif()

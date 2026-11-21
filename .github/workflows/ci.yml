@@ -5,9 +5,10 @@
 # branch coverage, pre-commit), compiles gawk natively with MSVC (x86_64) on
 # windows-latest and with OpenWatcom v2 for 32-bit DOS (dos32, MS-DOS 1.25,
 # MS-DOS 2.0, and MS-DOS 4.0), executes the CTest functional verification
-# suite, packages portable ZIP, NSIS (.exe), WiX (.msi), and DOS (.zip/.exe)
-# archives via CPack, and publishes both Windows and DOS release assets to
-# GitHub Releases on v* tags.
+# suite on Windows and inside headless QEMU MS-DOS (4.00, 2.00, 1.25) VMs via
+# SamuelMarks/c-ci, packages portable ZIP, NSIS (.exe), WiX (.msi), and DOS
+# (.zip/.exe) archives via CPack, and publishes both Windows and DOS release
+# assets to GitHub Releases on v* tags.
 # =============================================================================
 
 name: CI
@@ -23,6 +24,9 @@ on:
       - master
   workflow_dispatch:
 
+env:
+  msdos_testing: true
+
 permissions:
   contents: write
 
@@ -37,7 +41,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: e4591c52478e3050731205d18cfaba027269bd8c
+          ref: master
           path: auto-win-msvc
 
       - name: Setup Python
@@ -71,7 +75,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: e4591c52478e3050731205d18cfaba027269bd8c
+          ref: master
           path: auto-win-msvc
 
       - name: Setup Python
@@ -192,7 +196,7 @@ jobs:
         uses: actions/checkout@master
         with:
           repository: SamuelMarks/auto-win-msvc
-          ref: e4591c52478e3050731205d18cfaba027269bd8c
+          ref: master
           path: auto-win-msvc
 
       - name: Setup Python
@@ -301,3 +305,106 @@ jobs:
             build_dos/gawk-*-msdos-2.0.zip
             build_dos/gawk-*-msdos-4.0.zip
           generate_release_notes: true
+
+  test-dos:
+    name: ${{ matrix.label }} | OpenWatcom v2 | CTest (I386)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_target: msdos-4.0
+            label: MS-DOS 4.00
+          - os_target: msdos-2.0
+            label: MS-DOS 2.00
+          - os_target: msdos-1.25
+            label: MS-DOS 1.25
+    steps:
+      - name: Checkout gawk-windows
+        uses: actions/checkout@master
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@master
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          ref: master
+          path: auto-win-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@master
+        with:
+          python-version: '3.12'
+
+      - name: Stage c-ci and Bento Repositories
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$RUNNER_TEMP/c-ci" "$RUNNER_TEMP/bento"
+          git clone --depth 1 --branch master https://github.com/SamuelMarks/c-ci.git "$RUNNER_TEMP/c-ci"
+
+          cloned_bento=0
+          for ref_cand in "multi-os-qemu-aarch64" "dos" "main"; do
+            if git clone --depth 1 --branch "$ref_cand" https://github.com/SamuelMarks/bento.git "$RUNNER_TEMP/bento" 2>/dev/null; then
+              if [ -f "$RUNNER_TEMP/bento/msdos-builder.sh" ]; then
+                cloned_bento=1
+                break
+              fi
+              rm -rf "$RUNNER_TEMP/bento"
+            fi
+          done
+          if [ "$cloned_bento" -ne 1 ]; then
+            echo "Error: Failed to locate msdos-builder.sh in SamuelMarks/bento" >&2
+            exit 1
+          fi
+
+          bento_sha="$(git -C "$RUNNER_TEMP/bento" rev-parse HEAD)"
+          echo "BENTO_HEAD_SHA=${bento_sha}" >> "$GITHUB_ENV"
+
+      - name: Install Host Dependencies (QEMU, mtools, NASM, Ruby, CMake)
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 \
+            qemu-utils \
+            mtools \
+            dosfstools \
+            nasm \
+            unzip \
+            xz-utils \
+            ruby \
+            cmake \
+            curl \
+            ca-certificates
+
+      - name: Cache OpenWatcom v2 Toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/watcom-cache
+          key: c-ci-openwatcom-v2-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Cache Bento DOS Base Images & Compiled Stages
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bento/builds
+          key: c-ci-bento-dos-v2-${{ env.BENTO_HEAD_SHA }}-${{ matrix.os_target }}
+          restore-keys: |
+            c-ci-bento-dos-v2-${{ env.BENTO_HEAD_SHA }}-
+
+      - name: Build and Run CTest on ${{ matrix.os_target }} (I386)
+        shell: bash
+        env:
+          DOS_WATCOM_ROOT: ${{ runner.temp }}/watcom-cache
+          DOS_WORK_DIR: ${{ runner.temp }}/dos-work
+          DOS_BUILD_TYPE: Release
+          DOS_CMAKE_CONFIGURE_FLAGS: -DFETCHCONTENT_SOURCE_DIR_AUTO_WIN_MSVC=${{ github.workspace }}/auto-win-msvc
+        run: |
+          set -e
+          sh "$RUNNER_TEMP/c-ci/run_dos_watcom_matrix.sh" \
+            --mode standalone \
+            --os "${{ matrix.os_target }}" \
+            --arch I386 \
+            --bento-dir "$RUNNER_TEMP/bento" \
+            --project "$GITHUB_WORKSPACE"

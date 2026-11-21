@@ -99,6 +99,8 @@ def test_cmake_generate_windows_and_dos(tmp_path: Path) -> None:
     )
     assert res_dos.returncode == 0, res_dos.stderr
     dos_cfg = (out_dos / "config.h").read_text(encoding="utf-8")
+    assert "#ifdef OPENWATCOM_COMPAT_H" in dos_cfg
+    assert "#undef remove" in dos_cfg
     assert "#define PIPES_SIMULATED 1" in dos_cfg
     assert "#undef DYNAMIC" in dos_cfg
     assert "#undef HAVE_SOCKETS" in dos_cfg

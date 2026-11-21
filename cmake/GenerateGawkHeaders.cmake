@@ -311,6 +311,11 @@ function(gawk_build_config_h)
 
     if(ARG_TARGET_DOS)
         set(_cfg_dos [=[/* 32-bit Protected-Mode DOS (OpenWatcom / DJGPP) Configuration */
+#ifdef OPENWATCOM_COMPAT_H
+#undef fopen
+#undef freopen
+#undef remove
+#endif
 #undef DYNAMIC
 #undef HAVE_SOCKETS
 #undef HAVE_GETADDRINFO
