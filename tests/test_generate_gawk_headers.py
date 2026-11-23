@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
-CMAKE_SCRIPT = Path(__file__).resolve().parent.parent / "cmake" / "GenerateGawkHeaders.cmake"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CMAKE_SCRIPT = REPO_ROOT / "cmake" / "GenerateGawkHeaders.cmake"
 
 
 def run_cmake_generator(*args: str) -> subprocess.CompletedProcess[str]:
@@ -172,3 +174,46 @@ def test_cmake_fallback_ac_init_and_error_paths(tmp_path: Path) -> None:
     )
     assert res_fetch_fail.returncode != 0
     assert "Failed to fetch upstream gawk" in res_fetch_fail.stderr
+
+
+def test_cmakelists_uses_target_scoped_commands() -> None:
+    """Verify repository CMake configurations use target_* commands instead of globals."""
+    cmake_lists = (REPO_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    vagrantfile = (REPO_ROOT / "vagrant" / "dos" / "Vagrantfile").read_text(encoding="utf-8")
+    cpack_cfg = (REPO_ROOT / "CPackConfig.cmake").read_text(encoding="utf-8")
+    cpack_src_cfg = (REPO_ROOT / "CPackSourceConfig.cmake").read_text(encoding="utf-8")
+
+    forbidden_patterns = (
+        r"(?m)^\s*include_directories\s*\(",
+        r"(?m)^\s*link_directories\s*\(",
+        r"(?m)^\s*link_libraries\s*\(",
+        r"(?m)^\s*add_definitions\s*\(",
+        r"(?m)^\s*add_compile_definitions\s*\(",
+        r"(?m)^\s*add_compile_options\s*\(",
+        r"(?m)^\s*add_link_options\s*\(",
+        r"(?m)^\s*set_source_files_properties\s*\(",
+        r"CMAKE_C_STANDARD",
+        r"CMAKE_POLICY_VERSION_MINIMUM",
+        r"CMAKE_C_FLAGS_DEBUG",
+        r"CMAKE_EXE_LINKER_FLAGS_DEBUG",
+        r"FETCHCONTENT_SOURCE_DIR_AUTO-WIN-MSVC",
+        r"\bGAWK_VERSION\b",
+    )
+    for pattern in forbidden_patterns:
+        assert re.search(pattern, cmake_lists) is None, f"Forbidden global pattern: {pattern}"
+
+    required_target_commands = (
+        "target_sources(",
+        "target_include_directories(",
+        "target_compile_definitions(",
+        "target_compile_options(",
+        "target_compile_features(",
+        "target_link_options(",
+        "target_link_libraries(",
+    )
+    for cmd in required_target_commands:
+        assert cmd in cmake_lists, f"Expected modern {cmd} in CMakeLists.txt"
+
+    assert "CMAKE_C_STANDARD" not in vagrantfile
+    assert "${PROJECT_VERSION}" in cpack_cfg
+    assert "${PROJECT_VERSION}" in cpack_src_cfg

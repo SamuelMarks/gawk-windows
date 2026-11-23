@@ -11,6 +11,10 @@
 #      gawk_dos_minrx.c, gawk_dos_io.c).
 # =============================================================================
 
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+    include_guard(GLOBAL)
+endif()
+
 set(GAWK_DEFAULT_REV "9b2156156f47076b5e588448a89129cc59701a65")
 set(GAWK_DEFAULT_REPOS
     "https://https.git.savannah.gnu.org/git/gawk.git"
